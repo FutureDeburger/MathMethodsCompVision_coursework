@@ -450,16 +450,16 @@ class KeypointDetectorComparator:
         print("-" * 70)
 
         # Рекомендации
-        print("\nРЕКОМЕНДАЦИИ:")
-        print("-" * 40)
+        # print("\nРЕКОМЕНДАЦИИ:")
+        # print("-" * 40)
 
         best_matches = max(summary.items(), key=lambda x: x[1]['avg_matches'])[0]
         best_quality = max(summary.items(), key=lambda x: x[1]['avg_quality'])[0]
         best_speed = min(summary.items(), key=lambda x: x[1]['avg_time'])[0]
 
-        print(f"1. Для максимального количества совпадений: {best_matches}")
-        print(f"2. Для лучшего качества: {best_quality}")
-        print(f"3. Для максимальной скорости: {best_speed}")
+        # print(f"1. Для максимального количества совпадений: {best_matches}")
+        # print(f"2. Для лучшего качества: {best_quality}")
+        # print(f"3. Для максимальной скорости: {best_speed}")
 
         # Баланс
         balanced_scores = {}
@@ -558,6 +558,59 @@ class KeypointDetectorComparator:
         print(f"Размер: {panorama.shape[1]}x{panorama.shape[0]} пикселей")
 
 
+    def create_real_panorama(self, img1, img2):
+        print("\nСШИВАНИЕ РЕАЛЬНОЙ ПАНОРАМЫ (AKAZE)")
+
+        detector = cv2.AKAZE_create()
+
+        g1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        g2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+
+        kp1, d1 = detector.detectAndCompute(g1, None)
+        kp2, d2 = detector.detectAndCompute(g2, None)
+
+        if d1 is None or d2 is None:
+            print("Нет дескрипторов")
+            return
+
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+        matches = bf.knnMatch(d1, d2, k=2)
+
+        good = []
+        for m, n in matches:
+            if m.distance < 0.75 * n.distance:
+                good.append(m)
+
+        if len(good) < 4:
+            print("Недостаточно совпадений")
+            return
+
+        src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+        dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+
+        H, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
+
+        h1, w1 = img1.shape[:2]
+        h2, w2 = img2.shape[:2]
+
+        panorama = cv2.warpPerspective(
+            img2, H, (w1 + w2, max(h1, h2))
+        )
+
+        panorama[0:h1, 0:w1] = img1
+
+        cv2.imwrite("panorama_result.jpg", panorama)
+
+        plt.figure(figsize=(14, 6))
+        plt.imshow(cv2.cvtColor(panorama, cv2.COLOR_BGR2RGB))
+        plt.axis("off")
+        plt.title("РЕЗУЛЬТАТ ПАНОРАМЫ")
+        plt.show()
+
+        print("Панорама сохранена: panorama_result.jpg")
+
+
+
 def main():
     """Основная функция программы"""
     print("=" * 80)
@@ -567,9 +620,13 @@ def main():
     # Создаем экземпляр компаратора
     comparator = KeypointDetectorComparator()
 
+    img1 = cv2.imread("boat1.jpg")
+    img2 = cv2.imread("boat2.jpg")
+    comparator.create_real_panorama(img1, img2)
+
     # Создаем реалистичные тестовые изображения
-    print("\n1. Создание тестовых изображений...")
-    img1, img2 = comparator.create_realistic_test_images(save=True)
+    # print("\n1. Создание тестовых изображений...")
+    # img1, img2 = comparator.create_realistic_test_images(save=True)
 
     # Показываем тестовые изображения
     plt.figure(figsize=(12, 5))

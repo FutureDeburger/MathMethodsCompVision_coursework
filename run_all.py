@@ -8,99 +8,76 @@ import matplotlib.pyplot as plt
 # ===================== НАСТРОЙКИ =====================
 DATA_DIR = "data"
 RESULTS_DIR = "results"
+PLOTS_DIR = os.path.join(RESULTS_DIR, "plots")
+PANOS_DIR = os.path.join(RESULTS_DIR, "panoramas")
 
-NOISE_LEVELS = [0, 10]
-SCALES = [1.0, 0.8]
-ROTATIONS = [0, 15]
+os.makedirs(PLOTS_DIR, exist_ok=True)
+os.makedirs(PANOS_DIR, exist_ok=True)
 
 DETECTORS = ["SIFT", "ORB", "AKAZE"]
-
-os.makedirs(RESULTS_DIR, exist_ok=True)
-os.makedirs(f"{RESULTS_DIR}/plots", exist_ok=True)
-os.makedirs(f"{RESULTS_DIR}/panoramas", exist_ok=True)
-
-# ===================== ЗАГРУЗКА ДАННЫХ =====================
-def load_images():
-    images = []
-    for f in sorted(os.listdir(DATA_DIR)):
-        if f.lower().endswith(".jpg"):
-            img = cv2.imread(os.path.join(DATA_DIR, f))
-            if img is not None:
-                images.append(img)
-    return images
-
-# ===================== ИСКАЖЕНИЯ =====================
-def add_noise(img, level):
-    if level == 0:
-        return img.copy()
-    noise = np.random.normal(0, level, img.shape).astype(np.int16)
-    return np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
-
-def scale_image(img, scale):
-    h, w = img.shape[:2]
-    return cv2.resize(img, (int(w * scale), int(h * scale)))
-
-def rotate_image(img, angle):
-    h, w = img.shape[:2]
-    M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1)
-    return cv2.warpAffine(img, M, (w, h))
-
-def generate_variations(img):
-    out = []
-    for n in NOISE_LEVELS:
-        for s in SCALES:
-            for r in ROTATIONS:
-                v = rotate_image(scale_image(add_noise(img, n), s), r)
-                out.append((v, n, s, r))
-    return out
 
 # ===================== ДЕТЕКТОРЫ =====================
 def get_detector(name):
     if name == "SIFT":
         return cv2.SIFT_create()
     if name == "ORB":
-        return cv2.ORB_create(nfeatures=2000)
+        return cv2.ORB_create(nfeatures=4000)
     if name == "AKAZE":
         return cv2.AKAZE_create()
-    raise ValueError("Unknown detector")
+    raise ValueError(name)
 
-def run_detector(detector, img):
+def get_matcher(name):
+    if name == "SIFT":
+        return cv2.BFMatcher(cv2.NORM_L2)
+    return cv2.BFMatcher(cv2.NORM_HAMMING)
+
+# ===================== ЗАГРУЗКА ДАННЫХ =====================
+def load_images():
+    images = []
+    for f in sorted(os.listdir(DATA_DIR)):
+        if f.lower().endswith((".jpg", ".png")):
+            img = cv2.imread(os.path.join(DATA_DIR, f))
+            if img is not None:
+                images.append((f, img))
+    return images
+
+# ===================== МАТЧИНГ =====================
+def match_keypoints(detector_name, img1, img2):
+    detector = get_detector(detector_name)
+    matcher = get_matcher(detector_name)
+
     t0 = time.time()
-    kp, des = detector.detectAndCompute(img, None)
-    return kp, des, time.time() - t0
+    kp1, des1 = detector.detectAndCompute(img1, None)
+    kp2, des2 = detector.detectAndCompute(img2, None)
+    t_detect = time.time() - t0
 
-# ===================== MATCHING =====================
-def match_descriptors(des1, des2, name):
-    if des1 is None or des2 is None:
-        return []
-    if len(des1) < 2 or len(des2) < 2:
-        return []
+    if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
+        return None
 
-    norm = cv2.NORM_HAMMING if name in ["ORB", "AKAZE"] else cv2.NORM_L2
-    matcher = cv2.BFMatcher(norm)
+    matches = matcher.knnMatch(des1, des2, k=2)
 
-    try:
-        return matcher.knnMatch(des1, des2, k=2)
-    except cv2.error:
-        return []
-
-def lowe_ratio(matches, ratio=0.75):
     good = []
-    for m in matches:
-        if len(m) == 2 and m[0].distance < ratio * m[1].distance:
-            good.append(m[0])
-    return good
+    for m, n in matches:
+        if m.distance < 0.75 * n.distance:
+            good.append(m)
+
+    return {
+        "kp1": kp1,
+        "kp2": kp2,
+        "good": good,
+        "time": t_detect
+    }
 
 # ===================== ПАНОРАМА =====================
-def create_panorama(img1, img2, kp1, kp2, matches):
-    if len(matches) < 10:
+def build_panorama(img1, img2, kp1, kp2, matches):
+    if len(matches) < 4:
         return None
 
     src = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
     dst = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
 
     H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
-    if H is None or mask is None or np.sum(mask) < 10:
+    if H is None:
         return None
 
     h1, w1 = img1.shape[:2]
@@ -110,73 +87,66 @@ def create_panorama(img1, img2, kp1, kp2, matches):
     pano[0:h2, 0:w2] = img2
     return pano
 
-# ===================== ОСНОВНОЙ ЗАПУСК =====================
-if __name__ == "__main__":
+# ===================== ОСНОВНОЙ ЭКСПЕРИМЕНТ =====================
+def run():
     images = load_images()
     if len(images) < 2:
-        raise RuntimeError("Нужно минимум 2 изображения в папке data")
+        raise RuntimeError("Нужно минимум 2 изображения")
 
     metrics = []
 
-    for name in DETECTORS:
-        print(f"\n=== {name} ===")
-        detector = get_detector(name)
+    for det in DETECTORS:
+        print(f"\n=== {det} ===")
 
-        for i in range(len(images)):
-            for j in range(i + 1, len(images)):
-                vars1 = generate_variations(images[i])
-                vars2 = generate_variations(images[j])
+        for i in range(len(images) - 1):
+            name1, img1 = images[i]
+            name2, img2 = images[i + 1]
 
-                for v1, n1, s1, r1 in vars1:
-                    kp1, des1, t1 = run_detector(detector, v1)
+            result = match_keypoints(det, img1, img2)
+            if result is None:
+                continue
 
-                    for v2, n2, s2, r2 in vars2:
-                        kp2, des2, t2 = run_detector(detector, v2)
+            pano = build_panorama(
+                img1, img2,
+                result["kp1"],
+                result["kp2"],
+                result["good"]
+            )
 
-                        matches = match_descriptors(des1, des2, name)
-                        good = lowe_ratio(matches)
+            metrics.append({
+                "detector": det,
+                "image_pair": f"{name1}-{name2}",
+                "kp1": len(result["kp1"]),
+                "kp2": len(result["kp2"]),
+                "good_matches": len(result["good"]),
+                "time": result["time"]
+            })
 
-                        metrics.append({
-                            "detector": name,
-                            "kp1": len(kp1),
-                            "kp2": len(kp2),
-                            "good_matches": len(good),
-                            "noise1": n1,
-                            "noise2": n2,
-                            "scale1": s1,
-                            "scale2": s2,
-                            "rot1": r1,
-                            "rot2": r2,
-                            "time": t1 + t2
-                        })
+            if pano is not None:
+                out = f"{det}_{name1}_{name2}.jpg"
+                cv2.imwrite(os.path.join(PANOS_DIR, out), pano)
 
-                        # Панорамы только для чистых условий
-                        if n1 == n2 == 0 and r1 == r2 == 0:
-                            pano = create_panorama(v1, v2, kp1, kp2, good)
-                            if pano is not None:
-                                cv2.imwrite(
-                                    f"{RESULTS_DIR}/panoramas/{name}_{i}_{j}.jpg",
-                                    pano
-                                )
-
-    # ===================== СОХРАНЕНИЕ =====================
     df = pd.DataFrame(metrics)
-    df.to_csv(f"{RESULTS_DIR}/metrics.csv", index=False)
-    print("\nМетрики сохранены")
+    df.to_csv(os.path.join(RESULTS_DIR, "metrics.csv"), index=False)
 
-    # ===================== ГРАФИКИ =====================
-    for name in DETECTORS:
-        sub = df[df["detector"] == name]
-        if sub.empty:
-            continue
+    plot_results(df)
+    print("\nГотово. Результаты в папке results/")
+
+# ===================== ГРАФИКИ =====================
+def plot_results(df):
+    for det in df.detector.unique():
+        sub = df[df.detector == det]
 
         plt.figure(figsize=(7, 5))
-        plt.scatter(sub["kp1"] + sub["kp2"], sub["good_matches"], alpha=0.4)
-        plt.xlabel("Количество ключевых точек")
+        plt.scatter(sub["kp1"] + sub["kp2"], sub["good_matches"])
+        plt.xlabel("Число ключевых точек")
         plt.ylabel("Хорошие совпадения")
-        plt.title(name)
+        plt.title(det)
         plt.tight_layout()
-        plt.savefig(f"{RESULTS_DIR}/plots/{name}_matches.png")
+        plt.savefig(os.path.join(PLOTS_DIR, f"{det}_matches.png"))
         plt.close()
 
-    print("Графики построены. Эксперимент завершён.")
+# ===================== ЗАПУСК =====================
+if __name__ == "__main__":
+    print("OpenCV:", cv2.__version__)
+    run()
